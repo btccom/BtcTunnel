@@ -21,18 +21,14 @@
  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
  SOFTWARE.
  */
-#include <stdlib.h>
-#include <stdio.h>
-#include <signal.h>
-#include <err.h>
-#include <errno.h>
-#include <unistd.h>
+#ifndef TUT_SERVER_H_
+#define TUT_SERVER_H_
 
-#include <fstream>
-#include <streambuf>
+class Server {
 
-#include <glog/logging.h>
 
-int main(int argc, char **argv) {
-  return EXIT_SUCCESS;
-}
+public:
+  Server();
+};
+
+#endif

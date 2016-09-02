@@ -50,4 +50,4 @@ target_link_libraries(tutclient tcp2udp2tcp ${THRID_LIBRARIES})
 
 file(GLOB_RECURSE SERVER_SOURCES src/server/*.cc)
 add_executable(tutserver ${CLIENT_SOURCES})
-target_link_libraries(server tcp2udp2tcp ${THRID_LIBRARIES})
+target_link_libraries(tutserver tcp2udp2tcp ${THRID_LIBRARIES})
