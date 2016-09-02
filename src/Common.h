@@ -32,10 +32,18 @@
 #include <cstdint>
 
 #include <string>
-#include <vector>
-#include <utility>
+#include <map>
 
 #include <glog/logging.h>
 
+#define MAX_MESSAGE_LEN 1500
+#define KCP_CONV_VALUE  0x938a3e1du
+
+#define KCP_MSG_CONNIDX_NONE      0x0000u
+#define KCP_MSG_TYPE_CLOSE_CONN   0x01u     // close connection
+
+
+using std::string;
+using std::map;
 
 #endif
