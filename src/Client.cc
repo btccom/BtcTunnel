@@ -264,8 +264,8 @@ bool Client::setup() {
   //
   kcpKeepAliveTimer_ = event_new(base_, -1, EV_PERSIST,
                                  Client::cb_kcpKeepAlive, this);
-  struct timeval timer_1s = {1, 0};
-  event_add(kcpKeepAliveTimer_, &timer_1s);
+  struct timeval timer_20s = {20, 0};
+  event_add(kcpKeepAliveTimer_, &timer_20s);
 
   return true;
 }
