@@ -39,7 +39,9 @@
 ClientTCPSession::ClientTCPSession(const uint16_t connIdx,
                                    struct event_base *base,
                                    evutil_socket_t fd,
-                                   Client *client) {
+                                   Client *client):
+bev_(nullptr), client_(client), connIdx_(connIdx)
+{
   bev_ = bufferevent_socket_new(base, fd, BEV_OPT_CLOSE_ON_FREE);
   assert(bev_ != nullptr);
 
@@ -54,6 +56,19 @@ ClientTCPSession::ClientTCPSession(const uint16_t connIdx,
 ClientTCPSession::~ClientTCPSession() {
   // BEV_OPT_CLOSE_ON_FREE: fd will auto close
   bufferevent_free(bev_);
+}
+
+void ClientTCPSession::setTimeout(const int32_t readTimeout,
+                                  const int32_t writeTimeout) {
+  // clear it
+  bufferevent_set_timeouts(bev_, NULL, NULL);
+
+  // set a new one
+  struct timeval readtv  = {readTimeout, 0};
+  struct timeval writetv = {writeTimeout, 0};
+  bufferevent_set_timeouts(bev_,
+                           readTimeout  > 0 ? &readtv  : nullptr,
+                           writeTimeout > 0 ? &writetv : nullptr);
 }
 
 void ClientTCPSession::recvData(struct evbuffer *buf) {
@@ -74,13 +89,23 @@ void ClientTCPSession::sendData(const char *data, size_t len) {
 
 
 //////////////////////////////////// Client ////////////////////////////////////
-Client::Client(const string &udpUpstreamHost, const uint16_t udpUpstreamPort) {
+Client::Client(const string &udpUpstreamHost, const uint16_t udpUpstreamPort,
+               const string &listenIP, const uint16_t listenPort,
+               const int32_t tcpReadTimeout, const int32_t tcpWriteTimeout):
+running_(true), base_(nullptr), exitEvTimer_(nullptr), kcpUpdateTimer_(nullptr),
+updateUpstreamUDPAddressTimer_(nullptr),
+udpSockFd_(-1), udpUpstreamHost_(udpUpstreamHost), udpUpstreamPort_(udpUpstreamPort),
+udpReadEvent_(nullptr), listener_(nullptr),
+listenIP_(listenIP), listenPort_(listenPort),
+tcpReadTimeout_(tcpReadTimeout), tcpWriteTimeout_(tcpWriteTimeout),
+kcpInBuf_(nullptr), kcp_(nullptr)
+{
   base_ = event_base_new();
   assert(base_ != nullptr);
 
   kcp_ = ikcp_create(KCP_CONV_VALUE, this);
   kcp_->output = cb_kcpOutput;
-  ikcp_wndsize(kcp_, 128, 128);  // set kcp windown size
+  ikcp_wndsize(kcp_, 256, 256);  // set kcp windown size
   ikcp_nodelay(kcp_,
                1,  // enable nodelay
                10, // interval ms
@@ -102,6 +127,8 @@ Client::~Client() {
   	event_free(udpReadEvent_);
   if (exitEvTimer_)
     event_free(exitEvTimer_);
+  if (updateUpstreamUDPAddressTimer_)
+    event_free(updateUpstreamUDPAddressTimer_);
 
   event_base_free(base_);
 
@@ -156,6 +183,14 @@ bool Client::setup() {
   udpReadEvent_ = event_new(base_, udpSockFd_, EV_READ|EV_PERSIST,
                             cb_udpRead, this);
   event_add(udpReadEvent_, nullptr);
+
+  // get upstream udp address
+  memset(&udpUpstreamAddr_, 0, sizeof(udpUpstreamAddr_));
+  udpUpstreamAddr_.sin_family = AF_INET;
+  udpUpstreamAddr_.sin_port   = htons(udpUpstreamPort_);
+  if (!resolve(udpUpstreamHost_, &udpUpstreamAddr_.sin_addr)) {
+    return false;
+  }
 
   //
   // listen tcp address
@@ -223,6 +258,7 @@ void Client::listenerCallback(struct evconnlistener *listener,
 }
 
 void Client::addConnection(ClientTCPSession *session) {
+  session->setTimeout(tcpReadTimeout_, tcpWriteTimeout_);
   conns_.insert(std::make_pair(session->connIdx_, session));
 }
 
@@ -493,6 +529,4 @@ void Client::cb_tcpEvent(struct bufferevent *bev,
   // remove up tcp session
   client->removeConnection(csession, true /* send close msg to server */);
 }
-
-
 

@@ -37,9 +37,9 @@
 
 
 //////////////////////////////// ServerTCPSession //////////////////////////////
-ServerTCPSession::ServerTCPSession(const uint16_t connId, struct event_base *base,
-                                   Server *server)
-// TODO: args
+ServerTCPSession::ServerTCPSession(const uint16_t connIdx, struct event_base *base,
+                                   Server *server):
+bev_(nullptr), server_(server), connIdx_(connIdx)
 {
   bev_ = bufferevent_socket_new(base, -1, BEV_OPT_CLOSE_ON_FREE);
   assert(bev_ != nullptr);
@@ -59,7 +59,6 @@ bool ServerTCPSession::connect(struct sockaddr_in &sin) {
   // was successfully launched, and -1 if an error occurred.
   int res = bufferevent_socket_connect(bev_, (struct sockaddr *)&sin, sizeof(sin));
   if (res == 0) {
-    state_ = INIT;
     return true;
   }
 
@@ -97,24 +96,61 @@ void ServerTCPSession::sendData(const char *data, size_t len) {
 
 
 
-
 /////////////////////////////////// Server /////////////////////////////////////
-Server::Server(const string &udpIP, const uint16_t udpPort)
-// TODO: args
+Server::Server(const string &udpIP, const uint16_t udpPort,
+               const string &tcpUpstreamHost, const uint16_t tcpUpstreamPort,
+               const int32_t tcpReadTimeout, const int32_t tcpWriteTimeout):
+running_(true), base_(nullptr), exitEvTimer_(nullptr), kcpUpdateTimer_(nullptr),
+udpIP_(udpIP), udpPort_(udpPort), udpSockFd_(-1), udpReadEvent_(nullptr),
+kcpInBuf_(nullptr),
+tcpUpstreamHost_(tcpUpstreamHost), tcpUpstreamPort_(tcpUpstreamPort),
+tcpReadTimeout_(tcpReadTimeout), tcpWriteTimeout_(tcpWriteTimeout), kcp_(nullptr)
 {
   base_ = event_base_new();
   assert(base_ != nullptr);
 
   kcp_ = ikcp_create(KCP_CONV_VALUE, this);
   kcp_->output = cb_kcpOutput;
-  ikcp_wndsize(kcp_, 16, 16);  // set kcp windown size
+  ikcp_wndsize(kcp_, 256, 256);  // set kcp windown size
+  ikcp_nodelay(kcp_,
+               1,  // enable nodelay
+               10, // interval ms
+               2,  // fastresend: 2
+               1); // no traffic control
 
   kcpInBuf_ = evbuffer_new();
   assert(kcpInBuf_ != nullptr);
 }
 
 Server::~Server() {
-  // TODO
+}
+
+void Server::stop() {
+  if (!running_)
+    return;
+
+  running_ = false;
+
+  LOG(INFO) << "remove all tcp connections...";
+  for (auto conn : conns_) {
+    removeUpConnection(conn.second, true);
+  }
+
+  // stop server in N seconds, let it send close kcp msg to server
+  LOG(INFO) << "closing client in 3 seconds...";
+  exitEvTimer_ = evtimer_new(base_, Server::cb_exitLoop, this);
+  struct timeval threeSec = {3, 0};
+  event_add(exitEvTimer_, &threeSec);
+}
+
+void Server::cb_exitLoop(evutil_socket_t fd,
+                         short events, void *ptr) {
+  Server *server = static_cast<Server *>(ptr);
+  server->exitLoop();
+}
+
+void Server::exitLoop() {
+  event_base_loopexit(base_, NULL);
 }
 
 bool Server::setup() {
@@ -150,8 +186,32 @@ bool Server::setup() {
                             cb_udpRead, this);
   event_add(udpReadEvent_, nullptr);
 
+  //
+  // KCP interval update
+  //
+  kcpUpdateTimer_ = event_new(base_, -1, EV_PERSIST,
+                              Server::cb_kcpUpdate, this);
+  struct timeval timer_10ms = {0, 10000};  // 10ms
+  event_add(kcpUpdateTimer_, &timer_10ms);
+
   LOG(INFO) << "listen on udp: " << udpIP_ << ":" << udpPort_;
   return true;
+}
+
+void Server::cb_kcpUpdate(evutil_socket_t fd,
+                          short events, void *ptr) {
+  Server *server = static_cast<Server *>(ptr);
+  ikcp_update(server->kcp_, iclock());
+}
+
+void Server::kcpUpdateManually() {
+  event_del(kcpUpdateTimer_);
+
+  ikcp_update(kcp_, iclock());
+
+  // set agagin
+  struct timeval timer_10ms = {0, 10000};  // 10ms
+  event_add(kcpUpdateTimer_, &timer_10ms);
 }
 
 void Server::removeUpConnection(ServerTCPSession *session,
@@ -170,11 +230,23 @@ void Server::handleIncomingUDPMesasge(struct sockaddr_in *sin,
   targetAddr_     = *sin;
   targetAddrsize_ = addrSize;
 
-  // add to kcp coming evbuf
-  evbuffer_add(kcpInBuf_, inData, inDataSize);
+  ikcp_input(kcp_, (const char *)inData, inDataSize);
+
+  char buf[2048];
+  const int kLen = sizeof(buf);
+
+  while (1) {
+    int size = ikcp_recv(kcp_, buf, kLen);
+    if (size < 0) break;
+
+    // add to kcp coming evbuf
+    evbuffer_add(kcpInBuf_, buf, size);
+  }
 
   while (readKcpMsg()) {
   }
+
+  kcpUpdateManually();
 }
 
 bool Server::readKcpMsg() {
@@ -237,6 +309,8 @@ void Server::sendKcpMsg(const string &msg) {
     // should not happen
     LOG(FATAL) << "kcp send error: " << res;
   }
+
+  kcpUpdateManually();
 }
 
 void Server::handleKcpMsg(const uint16_t connIdx, const char *data, size_t len) {
@@ -257,6 +331,8 @@ void Server::handleKcpMsg(const uint16_t connIdx, const char *data, size_t len) 
       delete s;
       goto error;
     }
+    // set timout
+    s->setTimeout(tcpReadTimeout_, tcpWriteTimeout_);
 
     // connect success
     conns_.insert(std::make_pair(connIdx, s));
@@ -414,7 +490,6 @@ void Server::cb_tcpEvent(struct bufferevent *bev, short events, void *ptr) {
   Server *server = session->server_;
 
   if (events & BEV_EVENT_CONNECTED) {
-    session->state_ = ServerTCPSession::CONNECTED;
     return;
   }
 

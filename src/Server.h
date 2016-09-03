@@ -43,11 +43,6 @@ class ServerTCPSession {
   struct bufferevent *bev_;
 
 public:
-  enum State {
-    INIT          = 0,
-    CONNECTED     = 1
-  };
-  State state_;
   Server *server_;
   uint16_t connIdx_;  // connection index
 
@@ -66,8 +61,12 @@ public:
 
 /////////////////////////////////// Server /////////////////////////////////////
 class Server {
+  bool running_;
+
   // libevent2
   struct event_base *base_;
+  struct event *exitEvTimer_;     // deley to stop server when exit
+  struct event *kcpUpdateTimer_;  // call ikcp_update() interval
 
   // listen udp
   string   udpIP_;
@@ -76,7 +75,6 @@ class Server {
   struct event *udpReadEvent_;
 
   // KDP connection
-  ikcpcb *kcp_;
   struct evbuffer *kcpInBuf_;
 
   // idx -> conn
@@ -84,6 +82,10 @@ class Server {
 
   string   tcpUpstreamHost_;
   uint16_t tcpUpstreamPort_;
+
+  // timeout
+  int32_t  tcpReadTimeout_;
+  int32_t  tcpWriteTimeout_;
 
   // target addr
   struct sockaddr_in targetAddr_;
@@ -97,10 +99,20 @@ class Server {
   void handleKcpMsg_closeConn(const string &msg);
 
 public:
-  Server(const string &udpIP, const uint16_t udpPort);
+  ikcpcb *kcp_;
+
+public:
+  Server(const string &udpIP, const uint16_t udpPort,
+         const string &tcpUpstreamHost, const uint16_t tcpUpstreamPort,
+         const int32_t tcpReadTimeout, const int32_t tcpWriteTimeout);
   ~Server();
 
   bool setup();
+  void stop();
+  void exitLoop();
+
+  void kcpUpdateManually();
+
   void removeUpConnection(ServerTCPSession *session, bool isNeedSendCloseMsg);
 
   void handleIncomingUDPMesasge(struct sockaddr_in *sin, socklen_t addrSize,
@@ -113,6 +125,11 @@ public:
   static void cb_udpRead  (evutil_socket_t fd, short events, void *ptr);
   static void cb_tcpRead  (struct bufferevent *bev, void *ptr);
   static void cb_tcpEvent (struct bufferevent *bev,
+                           short events, void *ptr);
+
+  static void cb_exitLoop(evutil_socket_t fd,
+                          short events, void *ptr);
+  static void cb_kcpUpdate(evutil_socket_t fd,
                            short events, void *ptr);
 };
 

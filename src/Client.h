@@ -52,6 +52,8 @@ public:
                    evutil_socket_t fd, Client *client);
   ~ClientTCPSession();
 
+	void setTimeout(const int32_t readTimeout, const int32_t writeTimeout);
+
   void recvData(struct evbuffer *buf);
   void sendData(const char *data, size_t len);
 };
@@ -66,6 +68,7 @@ class Client {
   struct event_base *base_;
   struct event *exitEvTimer_;     // deley to stop server when exit
   struct event *kcpUpdateTimer_;  // call ikcp_update() interval
+  struct event *updateUpstreamUDPAddressTimer_;  // update udp server address
 
   // upstream udp
   int      udpSockFd_;
@@ -78,6 +81,10 @@ class Client {
   struct evconnlistener *listener_;
   string   listenIP_;
   uint16_t listenPort_;
+
+  // timeout
+  int32_t tcpReadTimeout_;
+  int32_t tcpWriteTimeout_;
 
   // KDP connection
   struct evbuffer *kcpInBuf_;
@@ -96,15 +103,17 @@ public:
   ikcpcb *kcp_;
 
 public:
-  Client(const string &udpUpstreamHost, const uint16_t udpUpstreamPort);
+  Client(const string &udpUpstreamHost, const uint16_t udpUpstreamPort,
+         const string &listenIP, const uint16_t listenPort,
+         const int32_t tcpReadTimeout, const int32_t tcpWriteTimeout);
   ~Client();
 
+  bool setup();
   void stop();
   void exitLoop();
 
   void kcpUpdateManually();
 
-  bool setup();
   static void listenerCallback(struct evconnlistener *listener,
                                evutil_socket_t fd,
                                struct sockaddr* saddr,
