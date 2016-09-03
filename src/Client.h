@@ -64,9 +64,9 @@ public:
 class Client {
   // libevent2
   struct event_base *base_;
-  struct event *exitEvTimer_;     // deley to stop server when exit
-  struct event *kcpUpdateTimer_;  // call ikcp_update() interval
-  struct event *updateUpstreamUDPAddressTimer_;  // update udp server address
+  struct event *exitEvTimer_;        // deley to stop server when exit
+  struct event *kcpUpdateTimer_;     // call ikcp_update() interval
+  struct event *kcpKeepAliveTimer_;  // kcp keep-alive
 
   // upstream udp
   int      udpSockFd_;
@@ -119,6 +119,7 @@ public:
   void checkInitKCP();
   void kcpUpdateManually();
   bool recvInitKCPConvPkg(const uint8_t *p);
+  void kcpKeepAlive();
 
   static void listenerCallback(struct evconnlistener *listener,
                                evutil_socket_t fd,
@@ -143,6 +144,8 @@ public:
                           short events, void *ptr);
   static void cb_kcpUpdate(evutil_socket_t fd,
                            short events, void *ptr);
+  static void cb_kcpKeepAlive(evutil_socket_t fd,
+                              short events, void *ptr);
   static void cb_initKCP(evutil_socket_t fd,
                          short events, void *ptr);
 };

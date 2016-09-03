@@ -323,7 +323,6 @@ bool Server::readKcpMsg() {
   //
   // | len(2) | connIdx(2):0 | type(1) | ... |
   //
-
   const size_t evBufLen = evbuffer_get_length(kcpInBuf_);
 
   if (evBufLen < 4)  // length should at least 4 bytes
@@ -356,7 +355,11 @@ bool Server::readKcpMsg() {
 
     if (type == KCP_MSG_TYPE_CLOSE_CONN) {
       handleKcpMsg_closeConn(kcpMsg);
-    } else {
+    }
+    else if (type == KCP_MSG_TYPE_KEEPALIVE) {
+      // keep-alive pkg, do nothing
+    }
+    else {
       LOG(ERROR) << "unkown kcp msg type: " << type;
     }
   }

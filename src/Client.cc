@@ -95,7 +95,7 @@ Client::Client(const string &udpUpstreamHost, const uint16_t udpUpstreamPort,
                const string &listenIP, const uint16_t listenPort,
                const int32_t tcpReadTimeout, const int32_t tcpWriteTimeout):
 base_(nullptr), exitEvTimer_(nullptr), kcpUpdateTimer_(nullptr),
-updateUpstreamUDPAddressTimer_(nullptr),
+kcpKeepAliveTimer_(nullptr),
 udpSockFd_(-1), udpUpstreamHost_(udpUpstreamHost), udpUpstreamPort_(udpUpstreamPort),
 udpReadEvent_(nullptr), listener_(nullptr),
 listenIP_(listenIP), listenPort_(listenPort),
@@ -126,12 +126,18 @@ Client::~Client() {
   evbuffer_free(kcpInBuf_);
   ikcp_release(kcp_);
 
-  if (udpReadEvent_)
+  if (udpReadEvent_) {
+    event_del(udpReadEvent_);
   	event_free(udpReadEvent_);
-  if (exitEvTimer_)
+  }
+  if (exitEvTimer_) {
+    event_del(exitEvTimer_);
     event_free(exitEvTimer_);
-  if (updateUpstreamUDPAddressTimer_)
-    event_free(updateUpstreamUDPAddressTimer_);
+  }
+  if (kcpKeepAliveTimer_) {
+    event_del(kcpKeepAliveTimer_);
+    event_free(kcpKeepAliveTimer_);
+  }
 
   event_base_free(base_);
 
@@ -253,6 +259,14 @@ bool Client::setup() {
   struct timeval timer_10ms = {0, 10000};  // 10ms
   event_add(kcpUpdateTimer_, &timer_10ms);
 
+  //
+  // KCP keep alive
+  //
+  kcpKeepAliveTimer_ = event_new(base_, -1, EV_PERSIST,
+                                 Client::cb_kcpKeepAlive, this);
+  struct timeval timer_1s = {1, 0};
+  event_add(kcpKeepAliveTimer_, &timer_1s);
+
   return true;
 }
 
@@ -317,6 +331,34 @@ void Client::kcpUpdateManually() {
   // set agagin
   struct timeval timer_10ms = {0, 10000};  // 10ms
   event_add(kcpUpdateTimer_, &timer_10ms);
+}
+
+void Client::cb_kcpKeepAlive(evutil_socket_t fd,
+                             short events, void *ptr) {
+  static_cast<Client *>(ptr)->kcpKeepAlive();
+}
+
+void Client::kcpKeepAlive() {
+  //
+  // KCP_MSG_TYPE_KEEPALIVE
+  // | len(2) | 0x0000(2) | 0x02(1) |
+  //
+  string kcpMsg;
+  kcpMsg.resize(5);
+  uint8_t *p = (uint8_t *)kcpMsg.data();
+
+  // len
+  *(uint16_t *)p = (uint16_t)kcpMsg.size();
+  p += 2;
+
+  // sepcial connIdx: 0
+  *(uint16_t *)p = (uint16_t)KCP_MSG_CONNIDX_NONE;
+  p += 2;
+
+  // type
+  *(uint8_t *)p++ = KCP_MSG_TYPE_KEEPALIVE;
+
+  sendKcpMsg(kcpMsg);
 }
 
 void Client::listenerCallback(struct evconnlistener *listener,
@@ -582,7 +624,9 @@ bool Client::recvInitKCPConvPkg(const uint8_t *p) {
       *(uint32_t *)(p + 4) == kcpConv_ &&
       *(uint32_t *)(p + 8) == kcpConv_ + 1) {
     isInitKCPConv_ = true;
+    return true;
   }
+  return false;
 }
 
 void Client::cb_udpRead(evutil_socket_t fd, short events, void *ptr) {

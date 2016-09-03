@@ -47,6 +47,7 @@
 
 #define KCP_MSG_CONNIDX_NONE      0x0000u
 #define KCP_MSG_TYPE_CLOSE_CONN   0x01u     // close connection
+#define KCP_MSG_TYPE_KEEPALIVE    0x02u     // keep-alive
 
 
 using std::string;
