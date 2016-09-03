@@ -75,9 +75,9 @@ bool resolve(const string &host, struct	in_addr *sin_addr) {
 
 
 
-//////////////////////////////// ServerSession /////////////////////////////////
-ServerSession::ServerSession(const uint16_t connId, struct event_base *base,
-                             Server *server)
+//////////////////////////////// ServerTCPSession /////////////////////////////////
+ServerTCPSession::ServerTCPSession(const uint16_t connId, struct event_base *base,
+                                   Server *server)
 // TODO: args
 {
   bev_ = bufferevent_socket_new(base, -1, BEV_OPT_CLOSE_ON_FREE);
@@ -89,11 +89,11 @@ ServerSession::ServerSession(const uint16_t connId, struct event_base *base,
   bufferevent_enable(bev_, EV_READ|EV_WRITE);
 }
 
-ServerSession::~ServerSession() {
+ServerTCPSession::~ServerTCPSession() {
   bufferevent_free(bev_);
 }
 
-bool ServerSession::connect(struct sockaddr_in &sin) {
+bool ServerTCPSession::connect(struct sockaddr_in &sin) {
   // bufferevent_socket_connect(): This function returns 0 if the connect
   // was successfully launched, and -1 if an error occurred.
   int res = bufferevent_socket_connect(bev_, (struct sockaddr *)&sin, sizeof(sin));
@@ -105,8 +105,8 @@ bool ServerSession::connect(struct sockaddr_in &sin) {
   return false;
 }
 
-void ServerSession::setTimeout(const int32_t readTimeout,
-                               const int32_t writeTimeout) {
+void ServerTCPSession::setTimeout(const int32_t readTimeout,
+                                  const int32_t writeTimeout) {
   // clear it
   bufferevent_set_timeouts(bev_, NULL, NULL);
 
@@ -118,7 +118,7 @@ void ServerSession::setTimeout(const int32_t readTimeout,
                            writeTimeout > 0 ? &writetv : nullptr);
 }
 
-void ServerSession::recvData(struct evbuffer *buf) {
+void ServerTCPSession::recvData(struct evbuffer *buf) {
   string msg;
   msg.resize(evbuffer_get_length(buf));
 
@@ -129,7 +129,7 @@ void ServerSession::recvData(struct evbuffer *buf) {
   server_->handleIncomingTCPMesasge(this, msg);
 }
 
-void ServerSession::sendData(const char *data, size_t len) {
+void ServerTCPSession::sendData(const char *data, size_t len) {
   // add data to a bufferevent’s output buffer
   bufferevent_write(bev_, data, len);
 }
@@ -191,7 +191,7 @@ bool Server::listenUDP() {
   return true;
 }
 
-void Server::removeUpConnection(ServerSession *session,
+void Server::removeUpConnection(ServerTCPSession *session,
                                 bool isNeedSendCloseMsg) {
   if (isNeedSendCloseMsg)
     sendKcpCloseMsg(session->connIdx_);
@@ -289,7 +289,7 @@ void Server::handleKcpMsg(const uint16_t connIdx, const char *data, size_t len) 
       goto error;
     }
 
-    ServerSession *s = new ServerSession(connIdx, base_, this);
+    ServerTCPSession *s = new ServerTCPSession(connIdx, base_, this);
     if (s->connect(sin)) {
       delete s;
       goto error;
@@ -326,7 +326,7 @@ void Server::handleKcpMsg_closeConn(const string &msg) {
   removeUpConnection(itr->second, false);
 }
 
-void Server::handleIncomingTCPMesasge(ServerSession *session,
+void Server::handleIncomingTCPMesasge(ServerTCPSession *session,
                                       string &msg) {
   //
   // cause we use uint16_t as the kcp message length, so we can't send message
@@ -427,15 +427,15 @@ void Server::cb_udpRead(evutil_socket_t fd, short events, void *ptr) {
 }
 
 void Server::cb_tcpRead(struct bufferevent *bev, void *ptr) {
-  static_cast<ServerSession *>(ptr)->recvData(bufferevent_get_input(bev));
+  static_cast<ServerTCPSession *>(ptr)->recvData(bufferevent_get_input(bev));
 }
 
 void Server::cb_tcpEvent(struct bufferevent *bev, short events, void *ptr) {
-  ServerSession *session = static_cast<ServerSession *>(ptr);
+  ServerTCPSession *session = static_cast<ServerTCPSession *>(ptr);
   Server *server = session->server_;
 
   if (events & BEV_EVENT_CONNECTED) {
-    session->state_ = ServerSession::CONNECTED;
+    session->state_ = ServerTCPSession::CONNECTED;
     return;
   }
 
@@ -452,7 +452,7 @@ void Server::cb_tcpEvent(struct bufferevent *bev, short events, void *ptr) {
   else {
     LOG(ERROR) << "unhandled upsession events: " << events;
   }
-
+  
   // remove up tcp session
   server->removeUpConnection(session, true /* send close msg to client */);
 }

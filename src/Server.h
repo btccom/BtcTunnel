@@ -33,23 +33,13 @@
 
 #include "ikcp.h"
 
-class ServerSession;
+
+class ServerTCPSession;
 class Server;
 
 
-//int callbackUdpOutputServer(const char *buf, int len, ikcpcb *kcp, void *ptr);
-
-
-/////////////////////////////////// Message ////////////////////////////////////
-//
-// uint16_t len_;
-// uint16_t connId_;   // ID for connection
-// char     contont_;  // message body
-//
-
-
-//////////////////////////////// ServerSession /////////////////////////////////
-class ServerSession {
+/////////////////////////////// ServerTCPSession ///////////////////////////////
+class ServerTCPSession {
   struct bufferevent *bev_;
 
 public:
@@ -62,8 +52,8 @@ public:
   uint16_t connIdx_;  // connection index
 
 public:
-  ServerSession(const uint16_t connIdx, struct event_base *base, Server *server);
-  ~ServerSession();
+  ServerTCPSession(const uint16_t connIdx, struct event_base *base, Server *server);
+  ~ServerTCPSession();
 
   bool connect(struct sockaddr_in &sin);
   void setTimeout(const int32_t readTimeout, const int32_t writeTimeout);
@@ -93,7 +83,7 @@ class Server {
   struct evbuffer *kcpInBuf_;
 
   // idx -> conn
-  map<uint16_t, ServerSession *> conns_;
+  map<uint16_t, ServerTCPSession *> conns_;
 
   string   tcpUpstreamHost_;
   uint16_t tcpUpstreamPort_;
@@ -114,11 +104,11 @@ public:
   ~Server();
 
   bool listenUDP();
-  void removeUpConnection(ServerSession *session, bool isNeedSendCloseMsg);
+  void removeUpConnection(ServerTCPSession *session, bool isNeedSendCloseMsg);
 
   void handleIncomingUDPMesasge(struct sockaddr_in *sin, socklen_t addrSize,
                                 uint8_t *inData, size_t inDataSize);
-  void handleIncomingTCPMesasge(ServerSession *session, string &msg);
+  void handleIncomingTCPMesasge(ServerTCPSession *session, string &msg);
 
   static int cb_kcpOutput(const char *buf, int len, ikcpcb *kcp, void *user);
 
