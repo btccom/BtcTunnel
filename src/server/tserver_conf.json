@@ -1,0 +1,10 @@
+{
+  "listen_udp_ip"  : "1.2.3.4",
+  "listen_udp_port": 18001,
+
+  "upstream_tcp_host": "cn.ss.btc.com",
+  "upstream_tcp_port": 1800,
+
+  "tcp_read_timeout": 120,
+  "tcp_write_timeout": 900
+}

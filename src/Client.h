@@ -109,6 +109,7 @@ public:
   ~Client();
 
   bool setup();
+  void run();
   void stop();
   void exitLoop();
 

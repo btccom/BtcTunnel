@@ -1,0 +1,10 @@
+{
+  "upstream_udp_host": "1.2.3.4",
+  "upstream_udp_port": 18001,
+
+  "listen_tcp_ip"  : "0.0.0.0",
+  "listen_tcp_port": 1800,
+
+  "tcp_read_timeout": 900,
+  "tcp_write_timeout": 120
+}

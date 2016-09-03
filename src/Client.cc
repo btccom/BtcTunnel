@@ -228,6 +228,11 @@ bool Client::setup() {
   return true;
 }
 
+void Client::run() {
+  assert(base_ != NULL);
+  event_base_dispatch(base_);
+}
+
 void Client::cb_kcpUpdate(evutil_socket_t fd,
                           short events, void *ptr) {
   Client *client = static_cast<Client *>(ptr);
@@ -300,12 +305,13 @@ bool Client::readKcpMsg() {
   // copy the fist 4 bytes
   uint8_t buf[4];
   evbuffer_copyout(kcpInBuf_, buf, 4);
+  const uint8_t *p = &buf[0];
 
-  const uint16_t msglen = *(uint16_t *)(buf);
+  const uint16_t msglen = *(uint16_t *)(p);
   if (evBufLen < msglen)  // didn't received the whole message yet
     return false;
 
-  const uint16_t connIdx = *(uint16_t *)(buf + 2);
+  const uint16_t connIdx = *(uint16_t *)(p + 2);
 
   // copies and removes the first datlen bytes from the front of buf
   // into the memory at data
