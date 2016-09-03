@@ -78,6 +78,7 @@ void ClientTCPSession::recvData(struct evbuffer *buf) {
   // copies and removes the first datlen bytes from the front of buf
   // into the memory at data
   evbuffer_remove(buf, (uint8_t *)msg.data(), msg.size());
+  DLOG(INFO) << "tcp recv(" << connIdx_ << "): " << msg;
 
   client_->handleIncomingTCPMesasge(this, msg);
 }
@@ -85,6 +86,7 @@ void ClientTCPSession::recvData(struct evbuffer *buf) {
 void ClientTCPSession::sendData(const char *data, size_t len) {
   // add data to a bufferevent’s output buffer
   bufferevent_write(bev_, data, len);
+  DLOG(INFO) << "tcp send(" << connIdx_ << "): " << string(data, len);
 }
 
 
@@ -92,18 +94,19 @@ void ClientTCPSession::sendData(const char *data, size_t len) {
 Client::Client(const string &udpUpstreamHost, const uint16_t udpUpstreamPort,
                const string &listenIP, const uint16_t listenPort,
                const int32_t tcpReadTimeout, const int32_t tcpWriteTimeout):
-running_(true), base_(nullptr), exitEvTimer_(nullptr), kcpUpdateTimer_(nullptr),
+base_(nullptr), exitEvTimer_(nullptr), kcpUpdateTimer_(nullptr),
 updateUpstreamUDPAddressTimer_(nullptr),
 udpSockFd_(-1), udpUpstreamHost_(udpUpstreamHost), udpUpstreamPort_(udpUpstreamPort),
 udpReadEvent_(nullptr), listener_(nullptr),
 listenIP_(listenIP), listenPort_(listenPort),
 tcpReadTimeout_(tcpReadTimeout), tcpWriteTimeout_(tcpWriteTimeout),
-kcpInBuf_(nullptr), kcp_(nullptr)
+isInitKCPConv_(false), kcpConv_((uint32_t)time(nullptr)),
+kcpInBuf_(nullptr), running_(true), kcp_(nullptr)
 {
   base_ = event_base_new();
   assert(base_ != nullptr);
 
-  kcp_ = ikcp_create(KCP_CONV_VALUE, this);
+  kcp_ = ikcp_create(kcpConv_, this);
   kcp_->output = cb_kcpOutput;
   ikcp_wndsize(kcp_, 256, 256);  // set kcp windown size
   ikcp_nodelay(kcp_,
@@ -193,6 +196,31 @@ bool Client::setup() {
   }
 
   //
+  // init kcp conv
+  //
+  {
+    sendInitKCPConvPkg();
+
+    struct event *initKCPTimer;
+    initKCPTimer = event_new(base_, -1, EV_PERSIST,
+                             Client::cb_initKCP, this);
+    struct timeval oneSec = {1, 0};
+    event_add(initKCPTimer, &oneSec);
+
+    // run event dispatch, it will break util server has received kcp conv
+    event_base_dispatch(base_);
+
+    // get here means: server got the kcp conv
+    event_del(initKCPTimer);
+    event_free(initKCPTimer);
+  }
+
+  // init failure, it'll stop the server.
+  if (!running_) {
+    return false;
+  }
+
+  //
   // listen tcp address
   //
   struct sockaddr_in sin;
@@ -228,6 +256,48 @@ bool Client::setup() {
   return true;
 }
 
+void Client::sendInitKCPConvPkg() {
+  // send init kcp conv pkg
+  string msg;
+  msg.resize(12);
+
+  uint8_t *p = (uint8_t *)msg.data();
+  *(uint32_t *)p = 0u;
+  p += 4;
+  *(uint32_t *)p = kcpConv_;
+  p += 4;
+  *(uint32_t *)p = kcpConv_ + 1;
+
+  sendto(udpSockFd_, msg.data(), msg.size(), MSG_DONTWAIT,
+         (struct sockaddr *)&udpUpstreamAddr_,
+         sizeof(udpUpstreamAddr_));
+}
+
+void Client::cb_initKCP(evutil_socket_t fd,
+                        short events, void *ptr) {
+  static_cast<Client *>(ptr)->checkInitKCP();
+}
+
+void Client::checkInitKCP() {
+  static time_t startTime = time(nullptr);
+
+  if (isInitKCPConv_) {
+    // break event loop
+    event_base_loopbreak(base_);
+    return;
+  }
+
+  // timeout
+  if (time(nullptr) > startTime + 10) {
+    LOG(ERROR) << "init KCP conv failure";
+    running_ = false;
+    exitLoop();
+    return;
+  }
+
+  sendInitKCPConvPkg();
+}
+
 void Client::run() {
   assert(base_ != NULL);
   event_base_dispatch(base_);
@@ -256,7 +326,7 @@ void Client::listenerCallback(struct evconnlistener *listener,
   Client *client = static_cast<Client *>(ptr);
   struct event_base  *base = (struct event_base*)client->base_;
 
-  uint16_t connIdx = 0u;  // TODO
+  uint16_t connIdx = 1u;  // TODO
   ClientTCPSession *csession = new ClientTCPSession(connIdx, base,
                                                     fd, client);
   client->addConnection(csession);
@@ -268,7 +338,16 @@ void Client::addConnection(ClientTCPSession *session) {
 }
 
 void Client::handleIncomingUDPMesasge(uint8_t *inData, size_t inDataSize) {
-  ikcp_input(kcp_, (const char *)inData, inDataSize);
+  // check if it's init kcp conv pkg
+  if (inDataSize == 12 && recvInitKCPConvPkg(inData)) {
+    return;
+  }
+
+  if (ikcp_input(kcp_, (const char *)inData, inDataSize) < 0) {
+    LOG(ERROR) << "ikcp_input failure";
+
+    return;
+  }
 
   char buf[2048];
   const int kLen = sizeof(buf);
@@ -325,6 +404,8 @@ bool Client::readKcpMsg() {
     //
     const uint8_t *p = (uint8_t *)msg.data();
     const uint8_t type = *(p + 4);
+    DLOG(INFO) << "recv kcp option msg, type: " << (uint32_t)type;
+
     if (type == KCP_MSG_TYPE_CLOSE_CONN) {
       handleKcpMsg_closeConn(msg);
     } else {
@@ -337,6 +418,7 @@ bool Client::readKcpMsg() {
     // data message
     //
     handleKcpMsg(connIdx, msg.data() + 4, msg.size() - 4);
+    DLOG(INFO) << "kcp recv: " << string(msg.data() + 4, msg.size() - 4);
   }
 
   return true;  // read message success, return true
@@ -417,6 +499,8 @@ void Client::sendKcpCloseMsg(const uint16_t connIdx) {
 
   // send
   sendKcpMsg(kcpMsg);
+
+  DLOG(INFO) << "send kcp msg, close conn: " << connIdx;
 }
 
 void Client::sendKcpMsg(const string &msg) {
@@ -476,6 +560,7 @@ void Client::handleIncomingTCPMesasge(ClientTCPSession *session, string &msg) {
 
     // content
     memcpy(p, msg.data(), len);
+    DLOG(INFO) << "kcp send: " << string(msg.begin(), msg.begin() + len);
 
     // send
     sendKcpMsg(kcpMsg);
@@ -488,6 +573,14 @@ void Client::handleIncomingTCPMesasge(ClientTCPSession *session, string &msg) {
 int Client::cb_kcpOutput(const char *buf, int len, ikcpcb *kcp, void *ptr) {
   Client *client = static_cast<Client *>(ptr);
   return client->sendKcpDataLowLevel(buf, len, kcp);
+}
+
+bool Client::recvInitKCPConvPkg(const uint8_t *p) {
+  if (*(uint32_t *)p == 0u &&
+      *(uint32_t *)(p + 4) == kcpConv_ &&
+      *(uint32_t *)(p + 8) == kcpConv_ + 1) {
+    isInitKCPConv_ = true;
+  }
 }
 
 void Client::cb_udpRead(evutil_socket_t fd, short events, void *ptr) {

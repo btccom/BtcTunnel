@@ -62,8 +62,6 @@ public:
 
 //////////////////////////////////// Client ////////////////////////////////////
 class Client {
-  bool running_;
-
   // libevent2
   struct event_base *base_;
   struct event *exitEvTimer_;     // deley to stop server when exit
@@ -87,6 +85,8 @@ class Client {
   int32_t tcpWriteTimeout_;
 
   // KDP connection
+  bool isInitKCPConv_;
+  uint32_t kcpConv_;
   struct evbuffer *kcpInBuf_;
 
   // idx -> conn
@@ -99,7 +99,10 @@ class Client {
   void handleKcpMsg(const uint16_t connIdx, const char *data, size_t len);
   void handleKcpMsg_closeConn(const string &msg);
 
+  void sendInitKCPConvPkg();
+
 public:
+  bool running_;
   ikcpcb *kcp_;
 
 public:
@@ -113,7 +116,9 @@ public:
   void stop();
   void exitLoop();
 
+  void checkInitKCP();
   void kcpUpdateManually();
+  bool recvInitKCPConvPkg(const uint8_t *p);
 
   static void listenerCallback(struct evconnlistener *listener,
                                evutil_socket_t fd,
@@ -138,6 +143,8 @@ public:
                           short events, void *ptr);
   static void cb_kcpUpdate(evutil_socket_t fd,
                            short events, void *ptr);
+  static void cb_initKCP(evutil_socket_t fd,
+                         short events, void *ptr);
 };
 
 #endif

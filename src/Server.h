@@ -75,6 +75,7 @@ class Server {
   struct event *udpReadEvent_;
 
   // KDP connection
+  uint32_t kcpConv_;
   struct evbuffer *kcpInBuf_;
 
   // idx -> conn
@@ -98,6 +99,8 @@ class Server {
   void handleKcpMsg(const uint16_t connIdx, const char *data, size_t len);
   void handleKcpMsg_closeConn(const string &msg);
 
+  void sendBackInitKCPConvPkg();
+
 public:
   ikcpcb *kcp_;
 
@@ -111,6 +114,9 @@ public:
   void run();
   void stop();
   void exitLoop();
+
+  void resetKCP();
+  bool recvInitKCPConvPkg(const uint8_t *p);
 
   void kcpUpdateManually();
 

@@ -85,6 +85,7 @@ void ServerTCPSession::recvData(struct evbuffer *buf) {
   // copies and removes the first datlen bytes from the front of buf
   // into the memory at data
   evbuffer_remove(buf, (uint8_t *)msg.data(), msg.size());
+  DLOG(INFO) << "tcp recv(" << connIdx_ << "): " << msg;
 
   server_->handleIncomingTCPMesasge(this, msg);
 }
@@ -92,6 +93,7 @@ void ServerTCPSession::recvData(struct evbuffer *buf) {
 void ServerTCPSession::sendData(const char *data, size_t len) {
   // add data to a bufferevent’s output buffer
   bufferevent_write(bev_, data, len);
+  DLOG(INFO) << "tcp send(" << connIdx_ << "): " << string(data, len);
 }
 
 
@@ -102,14 +104,61 @@ Server::Server(const string &udpIP, const uint16_t udpPort,
                const int32_t tcpReadTimeout, const int32_t tcpWriteTimeout):
 running_(true), base_(nullptr), exitEvTimer_(nullptr), kcpUpdateTimer_(nullptr),
 udpIP_(udpIP), udpPort_(udpPort), udpSockFd_(-1), udpReadEvent_(nullptr),
-kcpInBuf_(nullptr),
+kcpConv_(KCP_CONV_DEFAULT_VALUE), kcpInBuf_(nullptr),
 tcpUpstreamHost_(tcpUpstreamHost), tcpUpstreamPort_(tcpUpstreamPort),
 tcpReadTimeout_(tcpReadTimeout), tcpWriteTimeout_(tcpWriteTimeout), kcp_(nullptr)
 {
   base_ = event_base_new();
   assert(base_ != nullptr);
 
-  kcp_ = ikcp_create(KCP_CONV_VALUE, this);
+  resetKCP();
+}
+
+Server::~Server() {
+  if (kcp_)
+    ikcp_release(kcp_);
+
+  if (exitEvTimer_) {
+    event_del(exitEvTimer_);
+    event_free(exitEvTimer_);
+  }
+  if (kcpUpdateTimer_) {
+    event_del(kcpUpdateTimer_);
+    event_free(kcpUpdateTimer_);
+  }
+  if (udpReadEvent_) {
+    event_del(udpReadEvent_);
+    event_free(udpReadEvent_);
+  }
+
+  if (kcpInBuf_)
+    evbuffer_free(kcpInBuf_);
+
+  event_base_free(base_);
+}
+
+void Server::resetKCP() {
+  event_base_loopbreak(base_);
+
+  if (kcpUpdateTimer_) {
+    event_del(kcpUpdateTimer_);
+    event_free(kcpUpdateTimer_);
+  }
+
+  // reset buf
+  if (kcpInBuf_)
+    evbuffer_free(kcpInBuf_);
+  kcpInBuf_ = evbuffer_new();
+
+  if (kcp_)
+    ikcp_release(kcp_);
+
+  // close all conns
+  for (auto conn : conns_) {
+    removeUpConnection(conn.second, false);
+  }
+
+  kcp_ = ikcp_create(kcpConv_, this);
   kcp_->output = cb_kcpOutput;
   ikcp_wndsize(kcp_, 256, 256);  // set kcp windown size
   ikcp_nodelay(kcp_,
@@ -118,11 +167,13 @@ tcpReadTimeout_(tcpReadTimeout), tcpWriteTimeout_(tcpWriteTimeout), kcp_(nullptr
                2,  // fastresend: 2
                1); // no traffic control
 
-  kcpInBuf_ = evbuffer_new();
-  assert(kcpInBuf_ != nullptr);
-}
-
-Server::~Server() {
+  //
+  // KCP interval update
+  //
+  kcpUpdateTimer_ = event_new(base_, -1, EV_PERSIST,
+                              Server::cb_kcpUpdate, this);
+  struct timeval timer_10ms = {0, 10000};  // 10ms
+  event_add(kcpUpdateTimer_, &timer_10ms);
 }
 
 void Server::stop() {
@@ -186,21 +237,16 @@ bool Server::setup() {
                             cb_udpRead, this);
   event_add(udpReadEvent_, nullptr);
 
-  //
-  // KCP interval update
-  //
-  kcpUpdateTimer_ = event_new(base_, -1, EV_PERSIST,
-                              Server::cb_kcpUpdate, this);
-  struct timeval timer_10ms = {0, 10000};  // 10ms
-  event_add(kcpUpdateTimer_, &timer_10ms);
-
   LOG(INFO) << "listen on udp: " << udpIP_ << ":" << udpPort_;
   return true;
 }
 
 void Server::run() {
   assert(base_ != NULL);
-  event_base_dispatch(base_);
+  while (running_) {
+    event_base_dispatch(base_);
+    sleep(1);
+  }
 }
 
 void Server::cb_kcpUpdate(evutil_socket_t fd,
@@ -226,16 +272,30 @@ void Server::removeUpConnection(ServerTCPSession *session,
 
   conns_.erase(session->connIdx_);
   delete session;
+
+  LOG(INFO) << "remove up conn: " << session->connIdx_;
 }
 
 void Server::handleIncomingUDPMesasge(struct sockaddr_in *sin,
                                       socklen_t addrSize,
                                       uint8_t *inData, size_t inDataSize) {
   // copy the latest client address
-  targetAddr_     = *sin;
-  targetAddrsize_ = addrSize;
+  if (memcmp(&targetAddr_, sin, sizeof(struct sockaddr_in)) != 0) {
+    targetAddr_     = *sin;
+    targetAddrsize_ = addrSize;
+    LOG(INFO) << "reset target udp address: "
+    << inet_ntoa(sin->sin_addr) << ":" << ntohs(sin->sin_port);
+  }
 
-  ikcp_input(kcp_, (const char *)inData, inDataSize);
+  // check if it's init kcp conv pkg
+  if (inDataSize == 12 && recvInitKCPConvPkg(inData)) {
+    return;
+  }
+
+  if (ikcp_input(kcp_, (const char *)inData, inDataSize) < 0) {
+    LOG(ERROR) << "ikcp_input failure";
+    return;
+  }
 
   char buf[2048];
   const int kLen = sizeof(buf);
@@ -282,18 +342,20 @@ bool Server::readKcpMsg() {
 
   // copies and removes the first datlen bytes from the front of buf
   // into the memory at data
-  string msg;
-  msg.resize(msglen);
-  evbuffer_remove(kcpInBuf_, (uint8_t *)msg.data(), msg.size());
+  string kcpMsg;
+  kcpMsg.resize(msglen);
+  evbuffer_remove(kcpInBuf_, (uint8_t *)kcpMsg.data(), kcpMsg.size());
 
   if (connIdx == KCP_MSG_CONNIDX_NONE) {
     //
     // option message
     //
-    const uint8_t *p = (uint8_t *)msg.data();
+    const uint8_t *p = (uint8_t *)kcpMsg.data();
     const uint8_t type = *(p + 4);
+    DLOG(INFO) << "recv kcp option msg, type: " << (uint32_t)type;
+
     if (type == KCP_MSG_TYPE_CLOSE_CONN) {
-      handleKcpMsg_closeConn(msg);
+      handleKcpMsg_closeConn(kcpMsg);
     } else {
       LOG(ERROR) << "unkown kcp msg type: " << type;
     }
@@ -303,7 +365,8 @@ bool Server::readKcpMsg() {
     //
     // data message
     //
-    handleKcpMsg(connIdx, msg.data() + 4, msg.size() - 4);
+    handleKcpMsg(connIdx, kcpMsg.data() + 4, kcpMsg.size() - 4);
+    DLOG(INFO) << "kcp recv: " << string(kcpMsg.data() + 4, kcpMsg.size() - 4);
   }
 
   return true;  // read message success, return true
@@ -332,8 +395,10 @@ void Server::handleKcpMsg(const uint16_t connIdx, const char *data, size_t len) 
       goto error;
     }
 
+    LOG(INFO) << "create server tcp session, connIdx: " << connIdx;
     ServerTCPSession *s = new ServerTCPSession(connIdx, base_, this);
-    if (s->connect(sin)) {
+    if (s->connect(sin) == false) {
+      LOG(INFO) << "tcp session connect fail, connIdx: " << connIdx;
       delete s;
       goto error;
     }
@@ -405,6 +470,7 @@ void Server::handleIncomingTCPMesasge(ServerTCPSession *session,
 
     // content
     memcpy(p, msg.data(), len);
+    DLOG(INFO) << "kcp send: " << string(msg.begin(), msg.begin() + len);
 
     // send
     sendKcpMsg(kcpMsg);
@@ -449,6 +515,8 @@ void Server::sendKcpCloseMsg(const uint16_t connIdx) {
 
   // send
   sendKcpMsg(kcpMsg);
+
+  DLOG(INFO) << "send kcp msg, close conn: " << connIdx;
 }
 
 int Server::cb_kcpOutput(const char *buf, int len, ikcpcb *kcp, void *ptr) {
@@ -483,8 +551,47 @@ void Server::cb_udpRead(evutil_socket_t fd, short events, void *ptr) {
     LOG(ERROR) << "recvfrom error, return: " << res;
     return;
   }
+  DLOG(INFO) << "udp source: " << inet_ntoa(sin.sin_addr) << ":" << ntohs(sin.sin_port);
 
   server->handleIncomingUDPMesasge(&sin, size, (uint8_t *)buf, res);
+}
+
+bool Server::recvInitKCPConvPkg(const uint8_t *p) {
+  uint32_t conv = 0u;
+  if (*(uint32_t *)p != 0u) {
+    return false;
+  }
+  conv = *(uint32_t *)(p + 4);
+  if (*(uint32_t *)(p + 8) != conv + 1) {
+    return false;
+  }
+
+  if (kcpConv_ != conv) {
+    LOG(INFO) << "receive new KCP conv: " << conv;
+    kcpConv_ = conv;
+    resetKCP();
+  } else {
+    LOG(INFO) << "receive same KCP conv: " << conv;
+  }
+
+  sendBackInitKCPConvPkg();
+  return true;
+}
+
+void Server::sendBackInitKCPConvPkg() {
+  // send init kcp conv pkg
+  string msg;
+  msg.resize(12);
+
+  uint8_t *p = (uint8_t *)msg.data();
+  *(uint32_t *)p = 0u;
+  p += 4;
+  *(uint32_t *)p = kcpConv_;
+  p += 4;
+  *(uint32_t *)p = kcpConv_ + 1;
+
+  sendto(udpSockFd_, msg.data(), msg.size(), MSG_DONTWAIT,
+         (struct sockaddr *)&targetAddr_, sizeof(targetAddr_));
 }
 
 void Server::cb_tcpRead(struct bufferevent *bev, void *ptr) {

@@ -43,7 +43,7 @@
 #include "ikcp.h"
 
 #define MAX_MESSAGE_LEN 1500
-#define KCP_CONV_VALUE  0x938a3e1du
+#define KCP_CONV_DEFAULT_VALUE  0xFFFFFFFFu
 
 #define KCP_MSG_CONNIDX_NONE      0x0000u
 #define KCP_MSG_TYPE_CLOSE_CONN   0x01u     // close connection
