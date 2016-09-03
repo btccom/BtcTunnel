@@ -323,10 +323,12 @@ void Client::listenerCallback(struct evconnlistener *listener,
                               evutil_socket_t fd,
                               struct sockaddr* saddr,
                               int socklen, void *ptr) {
+  static uint16_t connIdx = 1u;  // TODO
+
   Client *client = static_cast<Client *>(ptr);
   struct event_base  *base = (struct event_base*)client->base_;
 
-  uint16_t connIdx = 1u;  // TODO
+  connIdx++;
   ClientTCPSession *csession = new ClientTCPSession(connIdx, base,
                                                     fd, client);
   client->addConnection(csession);
