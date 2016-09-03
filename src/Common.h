@@ -31,10 +31,16 @@
 #include <cstring>
 #include <cstdint>
 
+#include <time.h>
+#include <netinet/in.h>
+#include <sys/time.h>
+
 #include <string>
 #include <map>
 
 #include <glog/logging.h>
+
+#include "ikcp.h"
 
 #define MAX_MESSAGE_LEN 1500
 #define KCP_CONV_VALUE  0x938a3e1du
@@ -45,5 +51,26 @@
 
 using std::string;
 using std::map;
+
+bool resolve(const string &host, struct	in_addr *sin_addr);
+
+/* get system time */
+static inline void itimeofday(long *sec, long *usec) {
+  struct timeval time;
+  gettimeofday(&time, NULL);
+  if (sec) *sec = time.tv_sec;
+  if (usec) *usec = time.tv_usec;
+}
+/* get clock in millisecond 64 */
+inline IINT64 iclock64(void) {
+  long s, u;
+  IINT64 value;
+  itimeofday(&s, &u);
+  value = ((IINT64)s) * 1000 + (u / 1000);
+  return value;
+}
+inline IUINT32 iclock() {
+  return (IUINT32)(iclock64() & 0xfffffffful);
+}
 
 #endif

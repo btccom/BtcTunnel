@@ -26,6 +26,7 @@
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <sys/fcntl.h>
+#include <sys/types.h>
 #include <sys/socket.h>
 
 #include <event2/event.h>
@@ -33,49 +34,9 @@
 #include <event2/bufferevent.h>
 #include <event2/listener.h>
 
-static
-bool resolve(const string &host, struct	in_addr *sin_addr) {
-  struct evutil_addrinfo *ai = NULL;
-  struct evutil_addrinfo hints_in;
-  memset(&hints_in, 0, sizeof(evutil_addrinfo));
-  // AF_INET, v4; AF_INT6, v6; AF_UNSPEC, both v4 & v6
-  hints_in.ai_family   = AF_UNSPEC;
-  hints_in.ai_socktype = SOCK_STREAM;
-  hints_in.ai_protocol = IPPROTO_TCP;
-  hints_in.ai_flags    = EVUTIL_AI_ADDRCONFIG;
-
-  // TODO: use non-blocking to resolve hostname
-  int err = evutil_getaddrinfo(host.c_str(), NULL, &hints_in, &ai);
-  if (err != 0) {
-    LOG(ERROR) << "evutil_getaddrinfo err: " << err << ", " << evutil_gai_strerror(err);
-    return false;
-  }
-  if (ai == NULL) {
-    LOG(ERROR) << "evutil_getaddrinfo res is null";
-    return false;
-  }
-
-  // only get the first record, ignore ai = ai->ai_next
-  if (ai->ai_family == AF_INET) {
-    struct sockaddr_in *sin = (struct sockaddr_in*)ai->ai_addr;
-    *sin_addr = sin->sin_addr;
-
-    char ipStr[INET_ADDRSTRLEN];
-    inet_ntop(AF_INET, &(sin->sin_addr), ipStr, INET_ADDRSTRLEN);
-    LOG(INFO) << "resolve host: " << host << ", ip: " << ipStr;
-  } else if (ai->ai_family == AF_INET6) {
-    // not support yet
-    LOG(ERROR) << "not support ipv6 yet";
-    return false;
-  }
-  evutil_freeaddrinfo(ai);
-  return true;
-}
 
 
-
-
-//////////////////////////////// ServerTCPSession /////////////////////////////////
+//////////////////////////////// ServerTCPSession //////////////////////////////
 ServerTCPSession::ServerTCPSession(const uint16_t connId, struct event_base *base,
                                    Server *server)
 // TODO: args
@@ -146,6 +107,7 @@ Server::Server(const string &udpIP, const uint16_t udpPort)
 
   kcp_ = ikcp_create(KCP_CONV_VALUE, this);
   kcp_->output = cb_kcpOutput;
+  ikcp_wndsize(kcp_, 16, 16);  // set kcp windown size
 
   kcpInBuf_ = evbuffer_new();
   assert(kcpInBuf_ != nullptr);
@@ -155,7 +117,8 @@ Server::~Server() {
   // TODO
 }
 
-bool Server::listenUDP() {
+bool Server::setup() {
+  // serer udp listen address
   struct sockaddr_in sin;
   memset(&sin, 0, sizeof(sin));
   sin.sin_family      = AF_INET;
@@ -173,14 +136,14 @@ bool Server::listenUDP() {
     return false;
   }
 
+  // make non-blocking
+  fcntl(udpSockFd_, F_SETFL, O_NONBLOCK);
+
   // bind address
   if (bind(udpSockFd_, (struct sockaddr *) &sin, sizeof(sin)) == -1) {
     LOG(ERROR) << "bind udp socket failure: " << strerror(errno);
     return false;
   }
-
-  // make non-blocking
-  fcntl(udpSockFd_, F_SETFL, O_NONBLOCK);
 
   // add event
   udpReadEvent_ = event_new(base_, udpSockFd_, EV_READ|EV_PERSIST,
@@ -404,6 +367,22 @@ void Server::sendKcpCloseMsg(const uint16_t connIdx) {
 
   // send
   sendKcpMsg(kcpMsg);
+}
+
+int Server::cb_kcpOutput(const char *buf, int len, ikcpcb *kcp, void *ptr) {
+  Server *server = static_cast<Server *>(ptr);
+  return server->sendKcpDataLowLevel(buf, len, kcp);
+}
+
+int Server::sendKcpDataLowLevel(const char *buf, int len, ikcpcb *kcp) {
+  // On success, these calls return the number of characters sent.
+  // On error, -1 is returned, and errno is set appropriately.
+  ssize_t r = sendto(udpSockFd_, buf, (size_t)len, MSG_DONTWAIT,
+                     (struct sockaddr *)&targetAddr_, targetAddrsize_);
+  if (r == -1) {
+    LOG(ERROR) << "sendto error: " << strerror(errno);
+  }
+  return (int)r;
 }
 
 void Server::cb_udpRead(evutil_socket_t fd, short events, void *ptr) {

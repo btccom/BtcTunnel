@@ -66,11 +66,8 @@ public:
 
 /////////////////////////////////// Server /////////////////////////////////////
 class Server {
-
   // libevent2
   struct event_base *base_;
-  struct event *signal_event_;
-  struct evconnlistener *listener_;
 
   // listen udp
   string   udpIP_;
@@ -88,6 +85,10 @@ class Server {
   string   tcpUpstreamHost_;
   uint16_t tcpUpstreamPort_;
 
+  // target addr
+  struct sockaddr_in targetAddr_;
+  socklen_t targetAddrsize_;
+
   bool readKcpMsg();
   void sendKcpMsg(const string &msg);
   void sendKcpCloseMsg(const uint16_t connIdx);
@@ -96,27 +97,23 @@ class Server {
   void handleKcpMsg_closeConn(const string &msg);
 
 public:
-  struct sockaddr_in targetAddr_;  // target addr when send udp
-  socklen_t targetAddrsize_;
-
-public:
   Server(const string &udpIP, const uint16_t udpPort);
   ~Server();
 
-  bool listenUDP();
+  bool setup();
   void removeUpConnection(ServerTCPSession *session, bool isNeedSendCloseMsg);
 
   void handleIncomingUDPMesasge(struct sockaddr_in *sin, socklen_t addrSize,
                                 uint8_t *inData, size_t inDataSize);
   void handleIncomingTCPMesasge(ServerTCPSession *session, string &msg);
 
-  static int cb_kcpOutput(const char *buf, int len, ikcpcb *kcp, void *user);
+  int sendKcpDataLowLevel(const char *buf, int len, ikcpcb *kcp);
 
-  static void cb_udpRead(evutil_socket_t fd, short events, void *ptr);
-
-  static void cb_tcpRead (struct bufferevent *bev, void *ptr);
-  static void cb_tcpEvent(struct bufferevent *bev,
-                          short events, void *ptr);
+  static int  cb_kcpOutput(const char *buf, int len, ikcpcb *kcp, void *ptr);
+  static void cb_udpRead  (evutil_socket_t fd, short events, void *ptr);
+  static void cb_tcpRead  (struct bufferevent *bev, void *ptr);
+  static void cb_tcpEvent (struct bufferevent *bev,
+                           short events, void *ptr);
 };
 
 #endif

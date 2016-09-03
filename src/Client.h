@@ -24,11 +24,110 @@
 #ifndef TUT_CLIENT_H_
 #define TUT_CLIENT_H_
 
-class Client {
+#include "Common.h"
 
+#include <event2/event.h>
+#include <event2/buffer.h>
+#include <event2/bufferevent.h>
+#include <event2/listener.h>
+
+#include "ikcp.h"
+
+
+class ClientTCPSession;
+class Client;
+
+
+
+//////////////////////////////// ClientTCPSession //////////////////////////////
+class ClientTCPSession {
+  struct bufferevent *bev_;
 
 public:
-  Client();
+  Client *client_;
+  uint16_t connIdx_;  // connection index
+
+public:
+  ClientTCPSession(const uint16_t connIdx, struct event_base *base,
+                   evutil_socket_t fd, Client *client);
+  ~ClientTCPSession();
+
+  void recvData(struct evbuffer *buf);
+  void sendData(const char *data, size_t len);
+};
+
+
+
+//////////////////////////////////// Client ////////////////////////////////////
+class Client {
+  bool running_;
+
+  // libevent2
+  struct event_base *base_;
+  struct event *exitEvTimer_;     // deley to stop server when exit
+  struct event *kcpUpdateTimer_;  // call ikcp_update() interval
+
+  // upstream udp
+  int      udpSockFd_;
+  string   udpUpstreamHost_;
+  uint16_t udpUpstreamPort_;
+  struct sockaddr_in udpUpstreamAddr_;
+  struct event *udpReadEvent_;
+
+  // listen tcp
+  struct evconnlistener *listener_;
+  string   listenIP_;
+  uint16_t listenPort_;
+
+  // KDP connection
+  struct evbuffer *kcpInBuf_;
+
+  // idx -> conn
+  map<uint16_t, ClientTCPSession *> conns_;
+
+  bool readKcpMsg();
+  void sendKcpMsg(const string &msg);
+  void sendKcpCloseMsg(const uint16_t connIdx);
+
+  void handleKcpMsg(const uint16_t connIdx, const char *data, size_t len);
+  void handleKcpMsg_closeConn(const string &msg);
+
+public:
+  ikcpcb *kcp_;
+
+public:
+  Client(const string &udpUpstreamHost, const uint16_t udpUpstreamPort);
+  ~Client();
+
+  void stop();
+  void exitLoop();
+
+  void kcpUpdateManually();
+
+  bool setup();
+  static void listenerCallback(struct evconnlistener *listener,
+                               evutil_socket_t fd,
+                               struct sockaddr* saddr,
+                               int socklen, void *ptr);
+
+  void handleIncomingUDPMesasge(uint8_t *inData, size_t inDataSize);
+  void handleIncomingTCPMesasge(ClientTCPSession *session, string &msg);
+
+  void addConnection(ClientTCPSession *session);
+  void removeConnection(ClientTCPSession *session, bool isNeedSendCloseMsg);
+
+  int sendKcpDataLowLevel(const char *buf, int len, ikcpcb *kcp);
+
+  static int  cb_kcpOutput(const char *buf, int len, ikcpcb *kcp, void *user);
+  static void cb_udpRead  (evutil_socket_t fd, short events, void *ptr);
+  static void cb_tcpRead  (struct bufferevent *bev, void *ptr);
+  static void cb_tcpEvent (struct bufferevent *bev,
+                           short events, void *ptr);
+
+  static void cb_exitLoop(evutil_socket_t fd,
+                          short events, void *ptr);
+  static void cb_kcpUpdate(evutil_socket_t fd,
+                           short events, void *ptr);
 };
 
 #endif
